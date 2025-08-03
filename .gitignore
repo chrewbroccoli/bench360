@@ -176,4 +176,4 @@ config_RQ1.yaml
 config_RQ2.yaml
 excl_repo
 results/
-lookup/database
+benchmark/lookup/database/
