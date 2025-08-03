@@ -170,18 +170,9 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-inference/
 
 llama.cpp/
-
+config_RQ1.yaml
+config_RQ2.yaml
+excl_repo
 results/
-results_benchmark/
-configs/
-
-models/
-
-nohup.out
-
-experiments/
-results_archive/
-config.yaml

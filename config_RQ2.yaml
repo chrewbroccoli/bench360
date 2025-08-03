@@ -8,7 +8,6 @@ backend:         [vllm, sglang, lmdeploy, tgi]
 hf_model:
   #- mistralai/Mistral-7B-Instruct-v0.3
   #- Qwen/Qwen2.5-3B-Instruct
-  #- Qwen/Qwen2.5-7B-Instruct
   - meta-llama/Llama-3.1-8B-Instruct
 
 # ───────────────────────────────────
