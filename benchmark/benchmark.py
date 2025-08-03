@@ -448,6 +448,9 @@ class ModelBenchmark:
         elif task == "long_context_qa":
             from benchmark.tasks.long_context import LongContextQATask
             task_ = LongContextQATask()
+        elif task == "mmlu":
+            from benchmark.tasks.mmlu import MMLUTask
+            task_ = MMLUTask()
         else:
             raise ValueError(f"Task {task!r} not supported.")
 
