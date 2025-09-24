@@ -1,13 +1,15 @@
 import random
 from datasets import load_dataset
 import evaluate
+from benchmark.tasks.base_task import BaseTask
 
-class SummarizationTask:
+class SummarizationTask(BaseTask):
     """
     A class to handle the summarization task using the CNN/DailyMail dataset.
     """
 
     def __init__(self):
+        super().__init__()
         random.seed(42)
         self.rouge = evaluate.load("rouge")
         self.dataset = list(load_dataset("cnn_dailymail", "3.0.0")["test"])

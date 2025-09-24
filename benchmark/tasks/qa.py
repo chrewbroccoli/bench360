@@ -3,13 +3,15 @@ from datasets import load_dataset
 import re
 import string
 from ..utils import normalize_answer
+from benchmark.tasks.base_task import BaseTask
 
-class QATask:
+class QATask(BaseTask):
     """
     A class to handle the question answering task using the SQuAD v2 dataset.
     """
 
     def __init__(self):
+        super().__init__()
         random.seed(42)
         self.dataset = load_dataset("squad_v2")
 
@@ -123,8 +125,8 @@ class QATask:
 
 
 if __name__ == "__main__":
-    task = QATask(num_examples=3)
-    prompts, references = task.generate_prompts()
+    task = QATask()
+    prompts, references = task.generate_prompts(num_examples=3)
     for i in range(3):
         print(f"Prompt {i+1}:")
         print(prompts[i])

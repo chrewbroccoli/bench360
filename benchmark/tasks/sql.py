@@ -3,15 +3,17 @@ import json
 from datasets import load_dataset
 from pathlib import Path
 from sqlglot import parse_one
+from benchmark.tasks.base_task import BaseTask
 
 LOOKUP_DIR = Path(__file__).resolve().parents[2] / "benchmark" / "lookup"
 
-class SQLTask:
+class SQLTask(BaseTask):
     """
     A class to handle the SQL generation task using the Spider dataset.
     """
 
     def __init__(self, tables_path: str = None):
+        super().__init__()
         random.seed(42)
         self.dataset = list(load_dataset("spider", split="train"))
         self.tables_path = Path(tables_path or LOOKUP_DIR / "tables.json")
