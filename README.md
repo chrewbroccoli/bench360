@@ -66,7 +66,7 @@ Engines like **vLLM**, **TGI**, **SGLang**, and **LMDeploy** can be tested under
 Clone the repository:
 
 ```bash
-git clone [https://anonymous.4open.science/anonymize/bench360-01/fast_llm_inference.git]
+git clone [https://github.com/slinusc/bench360/fast_llm_inference.git]
 cd fast_llm_inference
 python3 -m venv venv
 source venv/bin/activate
