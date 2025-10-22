@@ -451,6 +451,12 @@ class ModelBenchmark:
         elif task == "mmlu":
             from benchmark.tasks.mmlu import MMLUTask
             task_ = MMLUTask()
+        elif task == "ie":
+            from benchmark.tasks.ie import InfoExtractionTask
+            task_ = InfoExtractionTask()
+        elif task == "easyQuestion":
+            from benchmark.tasks.easy_question import TinyQATask
+            task_ = TinyQATask()
         else:
             raise ValueError(f"Task {task!r} not supported.")
 
