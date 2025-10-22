@@ -82,7 +82,13 @@ def _run_multi_cfgs(cfgs: List[Dict[str, Any]], verbose: bool = False):
 
     # Combine + de-duplicate
     all_runs = {json.dumps(c, sort_keys=True): c for c in cfgs + prior_failures}
-    pending_cfgs = [cfg for cfg in all_runs.values() if not _results_exist(cfg)]
+
+    pending_cfgs = []
+    for cfg in all_runs.values():
+        if _results_exist(cfg):
+            console.print(f"[green] Results already exist for:[/] [bold]{cfg}[/]")
+        else:
+            pending_cfgs.append(cfg)
 
     MAX_ATTEMPTS = 3
     attempt = 1
