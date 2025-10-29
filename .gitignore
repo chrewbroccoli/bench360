@@ -178,4 +178,4 @@ config_test.yaml
 excl_repo
 results/
 benchmark/lookup/database/
-MMLU/
+.idea/
