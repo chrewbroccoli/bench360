@@ -169,50 +169,39 @@ class InfoExtractionTask(BaseTask):
     # Prompting
     # ----------------------------
     def _build_prompt(self, ocr_text: str, fields: List[str]) -> str:
-        """
-        Construct a compact, deterministic prompt. The model must output strict JSON only.
-        """
+        """ Construct a compact, deterministic prompt. The model must output strict JSON only, formatted as a single line (no newlines or indentation). """
+
         system_message = (
             "You extract structured fields from OCR text of a document.\n"
             "Output strictly a single JSON object with ONLY the requested keys.\n"
             "If a field is present multiple times, output a JSON array of unique values in reading order.\n"
-            "Do not include extra commentary, explanations, or keys."
+            "Do not include extra commentary, explanations, or keys.\n"
+            "The JSON must be compact and on a single line (no line breaks or spaces beyond those inside values)."
         )
 
         examples = (
             "### EXAMPLE\n"
             "OCR:\n"
-            "Invoice # 12345  |  Date: 2023-08-01  |  Total: $19.99\n"
-            "Vendor: ACME Corp.\n\n"
+            "Invoice # 12345 | Date: 2023-08-01 | Total: $19.99\n"
+            "Vendor: ACME Corp.\n"
+            "\n"
             "Requested keys:\n"
             "invoice_number, date, total_amount, vendor\n\n"
-            "Your JSON:\n"
-            "{\n"
-            '  "invoice_number": "12345",\n'
-            '  "date": "2023-08-01",\n'
-            '  "total_amount": "$19.99",\n'
-            '  "vendor": "ACME Corp."\n'
-            "}\n"
-        )
+            "Your JSON (single line):\n"
+            '{"invoice_number":"12345","date":"2023-08-01","total_amount":"$19.99","vendor":"ACME Corp."}\n')
 
         instruction = (
-            "### INSTRUCTION\n"
-            "Read the OCR text and return a JSON with EXACTLY these keys:\n"
-            f"{', '.join(fields)}\n\n"
-            "Rules:\n"
-            "  • Return strings for single values, and arrays for repeated values.\n"
-            "  • Preserve numbers/dates as they appear when reasonable.\n"
-            "  • If a key truly cannot be found, set it to null.\n"
-        )
+            "### INSTRUCTION\n" "Read the OCR text and return a JSON with EXACTLY these keys:\n"
+            f"{', '.join(fields)}\n\n" "Rules:\n"
+            " • Return strings for single values, and arrays for repeated values.\n"
+            " • Preserve numbers/dates as they appear when reasonable.\n"
+            " • If a key truly cannot be found, set it to null.\n"
+            " • Output must be a single-line JSON string with no extra whitespace or newlines.\n")
 
         input_block = (
-            "### OCR\n"
-            f"{ocr_text}\n\n"
-            "### OUTPUT (JSON only)\n"
+            "### OCR\n" f"{ocr_text}\n\n" "### OUTPUT (JSON only, one line)\n"
         )
-
-        return f"### SYSTEM\n{system_message}\n\n{examples}{instruction}{input_block}"
-
+        return f"{system_message}\n\n{examples}\n\n{instruction}\n{input_block}"
     # ----------------------------
     # Utilities: loading & parsing
     # ----------------------------
@@ -245,11 +234,6 @@ class InfoExtractionTask(BaseTask):
     def _extract_ocr_text(self, ex: Dict[str, Any], max_chars: int = 4000) -> str:
         """
         Best-effort OCR extraction across possible formats.
-        Tries common structures:
-            ex['ocr'] may be:
-              - list of tokens/lines, each a dict with 'text' or a 2-tuple [text, bbox]
-              - dict with 'pages' -> list -> 'tokens' or 'lines'
-              - flat string (rare)
         """
         ocr = ex.get("ocr")
 
@@ -296,31 +280,53 @@ class InfoExtractionTask(BaseTask):
           - annotations as dict: {field: [[text, bbox], ...]} or {field: ["text", ...]}
           - annotations as list: [[field, [[text, bbox], ...]], ...]
           - values possibly split across spans -> joined in reading order
+          - FIXES:
+              * collapse repeated runs inside a scalar ("A A A" -> "A")
+              * exact de-dup on lists (after cleanup)
+              * collapse single-item lists to scalars
         """
         ann = ex.get("annotations")
         if ann is None:
             return {}
 
         def spans_to_values(spans) -> List[str]:
-            vals = []
-            if isinstance(spans, list):
-                # could be list of spans or list of strings
-                # span can be ["text", bbox] or {"text": "..."} or string
-                buf: List[str] = []
-                for s in spans:
-                    if isinstance(s, str):
-                        buf.append(s)
-                    elif isinstance(s, dict):
-                        t = s.get("text")
-                        if isinstance(t, str):
-                            buf.append(t)
-                    elif isinstance(s, (list, tuple)) and len(s) >= 1:
-                        if isinstance(s[0], str):
-                            buf.append(s[0])
-                if buf:
-                    # join pieces as one value (most labels represent a single field instance)
-                    vals.append(" ".join(buf).strip())
-            return [v for v in (v.strip() for v in vals) if v]
+            """
+            Normalize one field's annotation bundle to a list of 0..N string values.
+            - If 'spans' is a flat list of text fragments -> produce ONE concatenated value.
+            - If 'spans' looks like a list of instances (each instance is a list/tuple of fragments)
+              -> produce multiple values (one per instance).
+            Repeated chunk runs inside a value are collapsed (e.g., "X X X" -> "X").
+            """
+            vals: List[str] = []
+            if not isinstance(spans, list):
+                return vals
+
+            # Heuristic: list of instances?
+            is_list_of_instances = (
+                spans
+                and all(isinstance(it, (list, tuple)) and any(self._span_text(p) for p in it) for it in spans)
+            )
+
+            if is_list_of_instances:
+                for inst in spans:
+                    pieces = [self._span_text(p) for p in inst if self._span_text(p)]
+                    if pieces:
+                        s = " ".join(pieces)
+                        s = " ".join(s.split())
+                        s = self._collapse_repeated_runs(s)
+                        if s:
+                            vals.append(s)
+                return vals
+
+            # Flat list -> single instance
+            pieces = [self._span_text(s) for s in spans if self._span_text(s)]
+            if pieces:
+                s = " ".join(pieces)
+                s = " ".join(s.split())
+                s = self._collapse_repeated_runs(s)
+                if s:
+                    vals.append(s)
+            return vals
 
         out: Dict[str, Union[str, List[str]]] = {}
 
@@ -329,7 +335,6 @@ class InfoExtractionTask(BaseTask):
                 vals = spans_to_values(spans)
                 if not vals:
                     continue
-                # if multiple instances, keep list, else scalar
                 out[field] = vals if len(vals) > 1 else vals[0]
 
         elif isinstance(ann, list):
@@ -344,25 +349,70 @@ class InfoExtractionTask(BaseTask):
                 if not vals:
                     continue
                 if field in out:
-                    # merge into list
                     prev = self._to_list_of_str(out[field])
                     out[field] = prev + vals
                 else:
                     out[field] = vals if len(vals) > 1 else vals[0]
 
-        # Clean up whitespace and dedupe within lists
+        # Cleanup + exact de-dup + collapse singletons
         cleaned: Dict[str, Union[str, List[str]]] = {}
         for k, v in out.items():
             if isinstance(v, list):
-                seen = []
+                seen: List[str] = []
                 for s in v:
                     s2 = " ".join(s.split())
-                    if s2 not in seen:
+                    s2 = self._collapse_repeated_runs(s2)
+                    if s2 and s2 not in seen:  # exact de-dup only
                         seen.append(s2)
-                cleaned[k] = seen
+                if len(seen) == 0:
+                    continue  # drop empty fields
+                if len(seen) == 1:
+                    cleaned[k] = seen[0]  # collapse singleton list to scalar
+                else:
+                    cleaned[k] = seen
             else:
-                cleaned[k] = " ".join(str(v).split())
+                s2 = " ".join(str(v).split())
+                s2 = self._collapse_repeated_runs(s2)
+                cleaned[k] = s2
         return cleaned
+
+    # ----------------------------
+    # Utilities: helpers (no fuzzy logic here)
+    # ----------------------------
+    @staticmethod
+    def _span_text(x) -> str:
+        """Extract textual content from a span element in various shapes."""
+        if isinstance(x, str):
+            return x
+        if isinstance(x, dict):
+            t = x.get("text")
+            return t if isinstance(t, str) else ""
+        if isinstance(x, (list, tuple)) and x and isinstance(x[0], str):
+            # e.g., ["text", bbox, ...]
+            return x[0]
+        return ""
+
+    @staticmethod
+    def _collapse_repeated_runs(s: str, max_k: int = 8) -> str:
+        """
+        Collapse exact repeated runs of a token sequence:
+        "A A A" -> "A"
+        "John Doe John Doe" -> "John Doe"
+        "$20,650.00 $20,650.00 $20,650.00" -> "$20,650.00"
+        Works at token level to preserve multi-word phrases.
+        """
+        toks = s.split()
+        n = len(toks)
+        if n <= 1:
+            return s
+        for k in range(2, min(max_k, n) + 1):
+            if n % k != 0:
+                continue
+            chunk_len = n // k
+            chunk = toks[:chunk_len]
+            if chunk * k == toks:
+                return " ".join(chunk)
+        return s
 
     # ----------------------------
     # Utilities: metrics
@@ -371,7 +421,6 @@ class InfoExtractionTask(BaseTask):
         try:
             return json.loads(s)
         except Exception:
-            # If the model wrapped JSON in code fences or added text, try to extract first {...}
             try:
                 start = s.find("{")
                 end = s.rfind("}")
@@ -412,6 +461,70 @@ class InfoExtractionTask(BaseTask):
             f1 = 2 * precision * recall / (precision + recall)
             best = max(best, f1)
         return best
+
+    def _normalize_list(self, vals: List[str]) -> List[str]:
+        """Normalize a list of strings using the benchmark normalize_answer."""
+        return [normalize_answer(v) for v in vals if v is not None]
+
+    def _field_exact_em(self, gold_vals: List[str], pred_vals: List[str]) -> float:
+        """
+        Exact match at field level:
+        - Normalize values
+        - Compare as sets (order/dupes ignored)
+        """
+        gold_norm = set(self._normalize_list(gold_vals))
+        pred_norm = set(self._normalize_list(pred_vals))
+        return 1.0 if gold_norm == pred_norm else 0.0
+
+    def _field_token_f1(self, gold_vals: List[str], pred_vals: List[str]) -> float:
+        """
+        Per-field token F1:
+        - If gold empty: 1 if pred empty else 0
+        - Else: for each gold value, take max token F1 vs all preds, then average
+        """
+        if len(gold_vals) == 0:
+            return 1.0 if len(pred_vals) == 0 else 0.0
+        scores = [self._token_f1(gv, pred_vals) for gv in gold_vals]
+        return sum(scores) / len(scores) if scores else 0.0
+
+    def _field_substring_match(self, gold_vals: List[str], pred_vals: List[str]) -> float:
+        """
+        Substring Match:
+        Each gold value must appear as a full, contiguous substring in at least
+        one predicted value (after normalization). We average over gold values.
+        """
+        gold_norm = self._normalize_list(gold_vals)
+        pred_norm = self._normalize_list(pred_vals)
+
+        if not gold_norm:
+            return 1.0 if not pred_norm else 0.0
+
+        def contained(g: str) -> float:
+            return 1.0 if any(g in p for p in pred_norm) else 0.0
+
+        scores = [contained(g) for g in gold_norm]
+        return sum(scores) / len(scores)
+
+    def _field_fuzzy_similarity(self, gold_vals: List[str], pred_vals: List[str]) -> float:
+        """
+        Fuzzy similarity metric (kept for evaluation only).
+        """
+        gold_norm = self._normalize_list(gold_vals)
+        pred_norm = self._normalize_list(pred_vals)
+
+        if not gold_norm:
+            return 1.0 if not pred_norm else 0.0
+        if not pred_norm:
+            return 0.0
+
+        def best_ratio(g: str) -> float:
+            best = 0.0
+            for p in pred_norm:
+                best = max(best, SequenceMatcher(None, g, p).ratio())
+            return best
+
+        scores = [best_ratio(g) for g in gold_norm]
+        return sum(scores) / len(scores)
 
 
 if __name__ == "__main__":
