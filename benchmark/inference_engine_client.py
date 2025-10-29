@@ -94,7 +94,7 @@ class InferenceEngineClient:
         prompt,
         model: str | None = None,
         temperature: float = 0.1,
-        max_tokens: int = 64,
+        max_tokens: int = 256,
         top_p: float = 0.9,
         stream: bool = False,
     ):

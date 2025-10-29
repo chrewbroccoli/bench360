@@ -4,6 +4,7 @@ from collections import deque
 import threading
 from threading import Thread
 from math import floor
+import json
 
 
 def tok_cnt(text: str) -> int:
@@ -63,8 +64,13 @@ def clean_prediction(prediction: list[str]) -> list[str]:
         # 2) Strip whitespace (including newlines) from both ends
         ans = ans.strip()
 
-        # 3) Remove anything after the first newline (in the stripped string)
-        ans = ans.split("\n", 1)[0]
+        # 3) If the whole thing is valid JSON, return a one-line JSON string
+        try:
+            obj = json.loads(ans)
+            ans = json.dumps(obj, separators=(",", ":"))  # minified, single line
+        except json.JSONDecodeError:
+            # 4) Not JSON: remove anything after the first newline
+            ans = ans.split("\n", 1)[0]
 
         cleaned.append(ans)
     return cleaned

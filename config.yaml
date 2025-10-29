@@ -1,0 +1,6 @@
+backend: tgi
+hf_model: Qwen/Qwen3-8B
+model_name: Qwen3-8B
+task: qa
+scenario: single
+samples: 10

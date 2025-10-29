@@ -451,6 +451,9 @@ class ModelBenchmark:
         elif task == "mmlu":
             from benchmark.tasks.mmlu import MMLUTask
             task_ = MMLUTask()
+        elif task == "ie":
+            from benchmark.tasks.ie import InfoExtractionTask
+            task_ = InfoExtractionTask()
         else:
             raise ValueError(f"Task {task!r} not supported.")
 
