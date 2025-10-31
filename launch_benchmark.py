@@ -78,7 +78,8 @@ def _ensure_output_dirs(exp_name: str) -> None:
 def _run_multi_cfgs(cfgs: List[Dict[str, Any]], verbose: bool = False):
     prior_failures = _load_prior_failures()
     has_prior_failures = len(prior_failures) > 0
-
+    if has_prior_failures:
+        console.print(f"[red] Retries of the following prior failures (if not wanted, delete failed_runs.log):[/][bold]{prior_failures}[/] ")
 
     # Combine + de-duplicate
     all_runs = {json.dumps(c, sort_keys=True): c for c in cfgs + prior_failures}
@@ -86,7 +87,7 @@ def _run_multi_cfgs(cfgs: List[Dict[str, Any]], verbose: bool = False):
     pending_cfgs = []
     for cfg in all_runs.values():
         if _results_exist(cfg):
-            console.print(f"[green] Results already exist for:[/] [bold]{cfg}[/]")
+            console.print(f"[red] Results already exist for:[/] [bold]{cfg}[/]")
         else:
             pending_cfgs.append(cfg)
 
@@ -257,6 +258,9 @@ def _multi_run_cycle(
 
     with progress:
         for idx, cfg in enumerate(runs, 1):
+            console.print(
+                f"Configuration: {cfg['backend']}/{cfg['model_name']} {cfg['task']}:{cfg['scenario']} {_param_bundle(cfg)}"
+            )
             desc = f"{cfg['backend']}/{cfg['model_name']} {cfg['task']}:{cfg['scenario']} {_param_bundle(cfg)}"
             progress.update(task_id, description=desc)
 
