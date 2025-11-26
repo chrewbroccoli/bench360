@@ -27,7 +27,7 @@ class InferenceEngineClient:
         2) Polls `http://127.0.0.1:23333/v1/models` every 2 seconds
            until the desired model shows up (or timeout).
         
-        :param backend: One of {tgi, vllm, mii, sglang, lmdeploy}
+        :param backend: One of {tgi, vllm, mii, sglang, lmdeploy, llamacpp}
         :param model: HF model ID or local path
         :param timeout: Max seconds to wait for the model to appear before raising.
         """
@@ -71,7 +71,7 @@ class InferenceEngineClient:
                     data = resp.json().get("data", [])
                     # Check if our model_id is in the loaded list
                     for entry in data:
-                        if entry.get("id") == model:
+                        if entry.get("id") == model or ".gguf" in entry.get("id"):
                             # Model is loaded and ready to serve
                             self.model = model
                             return
@@ -98,6 +98,7 @@ class InferenceEngineClient:
         top_p: float = 0.9,
         stream: bool = False,
     ):
+        print(prompt)
         """
         Send one or more prompts. :param prompt: string or list[str]
         """
@@ -106,7 +107,7 @@ class InferenceEngineClient:
 
         resp = self.client.completions.create(
             model=self.model,
-            prompt=prompt,
+            prompt=prompt[0],
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,

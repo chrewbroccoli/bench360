@@ -39,15 +39,15 @@ Engines like **vLLM**, **TGI**, **SGLang**, and **LMDeploy** can be tested under
 
 ## ⚙️ Features
 
-| Category            | Description                                                                 |
-|---------------------|-----------------------------------------------------------------------------|
-| **Tasks**           | Summarization, Question Answering (QA), Text-to-SQL                         |
-| **Scenarios**       | `single`, `batch`, and `server` (Poisson arrival multi-threads)             |
+| Category            | Description                                                                             |
+|---------------------|-----------------------------------------------------------------------------------------|
+| **Tasks**           | Summarization, Question Answering (QA), Text-to-SQL                                     |
+| **Scenarios**       | `single`, `batch`, and `server` (Poisson arrival multi-threads)                         |
 | **Metrics**         | Latency (ATL/GL), Throughput (TPS, SPS), GPU/CPU util, Energy, Quality (F1, ROUGE, AST) |
-| **Backends**        | vLLM, TGI, SGLang, LMDeploy                                                 |
-| **Quantization**    | Support for FP16, INT8, INT4 (GPTQ, AWQ, GGUF)                              |
-| **Cost Estimation** | Energy and amortized GPU cost per request                                   |
-| **Output Format**   | CSV (run-level + per-sample details), logs, and visual plots ready          |
+| **Backends**        | vLLM, TGI, SGLang, LMDeploy, llamacpp                                                   |
+| **Quantization**    | Support for FP16, INT8, INT4 (GPTQ, AWQ, GGUF)                                          |
+| **Cost Estimation** | Energy and amortized GPU cost per request                                               |
+| **Output Format**   | CSV (run-level + per-sample details), logs, and visual plots ready                      |
 
 ---
 
@@ -90,9 +90,11 @@ docker pull lmsysorg/sglang:latest
 docker pull openmmlab/lmdeploy:latest
 docker pull vllm/vllm-openai:latest
 docker pull ghcr.io/huggingface/text-generation-inference:latest
+docker pull ghcr.io/ggerganov/llama.cpp:full
+docker pull ghcr.io/ggerganov/llama.cpp:server-cuda
 ```
 
-Export your Huggingface Token:
+Export your Huggingface Token: 
 
 ```bash
 export HF_TOKEN=<your HF token>

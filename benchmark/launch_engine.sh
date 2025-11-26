@@ -5,7 +5,7 @@
 # Usage:
 #   ./launch_engine --engine=<engine> --model=<model>
 #
-#   <engine> ∈ { tgi | vllm | mii | sglang | lmdeploy }
+#   <engine> ∈ { tgi | vllm | mii | sglang | lmdeploy | llamacpp}
 #   <model>  is the Hugging Face model ID (e.g. “mistralai/Mistral-7B-Instruct-v0.3”)
 #
 # Example:
@@ -32,7 +32,7 @@ for ARG in "$@"; do
       ;;
     *)
       echo "Unknown argument: $ARG"
-      echo "Usage: $0 --engine=<tgi|vllm|mii|sglang|lmdeploy> --model=<your-org/your-model-name>"
+      echo "Usage: $0 --engine=<tgi|vllm|mii|sglang|lmdeploy|llamacpp> --model=<your-org/your-model-name>"
       exit 1
       ;;
   esac
@@ -40,7 +40,7 @@ done
 
 if [[ -z "$ENGINE" || -z "$MODEL" ]]; then
   echo "Error: both --engine and --model must be provided."
-  echo "Usage: $0 --engine=<tgi|vllm|mii|sglang|lmdeploy> --model=<your-org/your-model-name>"
+  echo "Usage: $0 --engine=<tgi|vllm|mii|sglang|lmdeploy|llamacpp> --model=<your-org/your-model-name>"
   exit 1
 fi
 
@@ -56,6 +56,100 @@ fi
 
 # ─── Select and run the requested engine ────────────────────────────────────
 case "$ENGINE" in
+
+  # ──────────────────────────────────────────────────────────────
+  # llama.cpp backend (2-step: convert HF -> GGUF, then server)
+  # Example:
+  #   ENGINE=llamacpp \
+  #   MODEL_ID="mistralai/Mistral-7B-Instruct-v0.2" \
+  #   ./launch_engine.sh
+  # ──────────────────────────────────────────────────────────────
+  llamacpp)
+    # ===== CONFIG =====
+    MODEL_ID="${MODEL_ID:-${MODEL:-mistralai/Mistral-7B-Instruct-v0.2}}"
+    REVISION="${REVISION:-main}"
+
+    # Where to store converted models
+    OUT_DIR="${OUT_DIR:-$HOME/models}"
+
+    # outtype is what convert-hf-to-gguf uses: f16, f32, q4_0, q4_k_m, q8_0, ...
+    OUTTYPE="${OUTTYPE:-f16}"
+
+    # llama.cpp server settings
+    CTX="${CTX:-4096}"
+    BATCH="${BATCH:-512}"
+    N_GPU_LAYERS="${N_GPU_LAYERS:-99}"
+
+    # Which server image to use (CPU vs CUDA)
+    LLAMACPP_FULL_IMAGE="${LLAMACPP_FULL_IMAGE:-ghcr.io/ggerganov/llama.cpp:full}"
+    LLAMACPP_SERVER_IMAGE="${LLAMACPP_SERVER_IMAGE:-ghcr.io/ggerganov/llama.cpp:server-cuda}"
+
+    # ===== PREP =====
+    command -v docker >/dev/null || { echo "docker not found"; exit 1; }
+    command -v huggingface-cli >/dev/null || { echo "huggingface-cli not found (pip install -U huggingface-hub)"; exit 1; }
+
+    SAFE_NAME="${MODEL_ID//\//__}"
+    MODEL_ROOT="${OUT_DIR%/}/${SAFE_NAME}"
+    HF_DIR="${MODEL_ROOT}/hf"
+    mkdir -p "$HF_DIR"
+
+    echo "[llamacpp] MODEL_ID=$MODEL_ID"
+    echo "[llamacpp] REVISION=$REVISION"
+    echo "[llamacpp] OUT_DIR=$OUT_DIR"
+    echo "[llamacpp] OUTTYPE=$OUTTYPE"
+
+    # Try to reuse an existing GGUF if present
+    GGUF_FILE="$(compgen -G "$MODEL_ROOT"/*.gguf | head -n 1 || true)"
+
+    if [ -z "$GGUF_FILE" ]; then
+      echo "[llamacpp] No existing .gguf in $MODEL_ROOT – downloading HF model & converting"
+
+      # ── Step 1: download HF model (safetensors etc.) ───────────────────────
+      echo "[llamacpp] Downloading $MODEL_ID (rev=$REVISION) into $HF_DIR"
+      huggingface-cli download \
+        "$MODEL_ID" \
+        --revision "$REVISION" \
+        --local-dir "$HF_DIR" \
+        --include "*" \
+        --local-dir-use-symlinks False
+
+      # ── Step 2: convert to GGUF using llama.cpp:full ──────────────────────
+      echo "[llamacpp] Converting HF model to GGUF via $LLAMACPP_FULL_IMAGE (outtype=$OUTTYPE)"
+      docker run --rm \
+        -v "$HF_DIR":/repo \
+        "$LLAMACPP_FULL_IMAGE" \
+        --convert /repo \
+        --outtype "$OUTTYPE"
+
+      # The convert tool usually writes something like ggml-model-f16.gguf in /repo
+      GGUF_IN_HF="$(ls -1 "$HF_DIR"/*.gguf 2>/dev/null | head -n 1)"
+      if [ -z "$GGUF_IN_HF" ]; then
+        echo "[llamacpp] ERROR: conversion did not produce a .gguf file in $HF_DIR"
+        exit 1
+      fi
+
+      # Normalize filename in MODEL_ROOT
+      TARGET_GGUF="$MODEL_ROOT/model-${OUTTYPE}.gguf"
+      mv "$GGUF_IN_HF" "$TARGET_GGUF"
+      GGUF_FILE="$TARGET_GGUF"
+    fi
+
+    echo "[llamacpp] Using GGUF file: $GGUF_FILE"
+
+    # ===== RUN LLAMA.CPP SERVER (2nd container) =====
+    echo "[llamacpp] Starting llama.cpp server from $LLAMACPP_SERVER_IMAGE on port $PORT"
+
+    docker run --rm \
+      --gpus all \
+      -p "127.0.0.1:${PORT}:${PORT}" \
+      -v "$MODEL_ROOT":/models \
+      "$LLAMACPP_SERVER_IMAGE" \
+        -m "/models/$(basename "$GGUF_FILE")" \
+        -c "$CTX" \
+        --port "$PORT" \
+        --host 0.0.0.0 \
+        --n-gpu-layers "$N_GPU_LAYERS"
+    ;;
 
   tgi)
     # ────────────────────────────────────────────────────────────────────────
@@ -79,7 +173,7 @@ case "$ENGINE" in
       -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
       -e HF_TOKEN="$HF_TOKEN" \
       -p 127.0.0.1:${PORT}:${PORT} \
-      ghcr.io/huggingface/text-generation-inference:3.3.1 \
+      ghcr.io/huggingface/text-generation-inference:latest \
         --model-id "$MODEL" \
         --trust-remote-code \
         --port "$PORT" \

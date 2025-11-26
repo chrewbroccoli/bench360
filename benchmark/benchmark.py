@@ -49,8 +49,8 @@ class ModelBenchmark:
         model_path=None,
         verbose=False
     ):
-        if backend not in ("tgi", "mii", "sglang", "vllm", "lmdeploy"):
-            raise ValueError(f"Unsupported backend: {backend}. Supported backends are: tgi, mii, sglang, vllm, lmdeploy.")
+        if backend not in ("tgi", "mii", "sglang", "vllm", "lmdeploy", "llamacpp"):
+            raise ValueError(f"Unsupported backend: {backend}. Supported backends are: tgi, mii, sglang, vllm, lmdeploy, llamacpp.")
         self.backend = backend
         self.model_path = model_path
         self.model_name = model_name

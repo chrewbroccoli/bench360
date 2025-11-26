@@ -79,7 +79,8 @@ def _run_multi_cfgs(cfgs: List[Dict[str, Any]], verbose: bool = False):
     prior_failures = _load_prior_failures()
     has_prior_failures = len(prior_failures) > 0
     if has_prior_failures:
-        console.print(f"[red] Retries of the following prior failures (if not wanted, delete failed_runs.log):[/][bold]{prior_failures}[/] ")
+        console.print(f"[red] Retries of the following prior failures (if not wanted, delete failed_runs.log): ")
+        console.print(f"{prior_failures}")
 
     # Combine + de-duplicate
     all_runs = {json.dumps(c, sort_keys=True): c for c in cfgs + prior_failures}
