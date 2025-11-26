@@ -71,7 +71,7 @@ class InferenceEngineClient:
                     data = resp.json().get("data", [])
                     # Check if our model_id is in the loaded list
                     for entry in data:
-                        if entry.get("id") == model or ".gguf" in entry.get("id"):
+                        if entry.get("id").lower() == model.lower() or ".gguf" in entry.get("id"):
                             # Model is loaded and ready to serve
                             self.model = model
                             return
@@ -98,7 +98,6 @@ class InferenceEngineClient:
         top_p: float = 0.9,
         stream: bool = False,
     ):
-        print(prompt)
         """
         Send one or more prompts. :param prompt: string or list[str]
         """

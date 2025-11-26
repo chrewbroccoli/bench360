@@ -39,7 +39,8 @@ def _sanitize(run: Dict[str, Any]) -> Dict[str, Any]:
 
     # ensure model_name
     if not run.get("model_name"):
-        run["model_name"] = _derive_name(run["hf_model"])
+        repo = run["hf_model"]["name"]
+        run["model_name"] = _derive_name(repo)
 
     return run
 # ───────────────────────── main loader
@@ -67,7 +68,7 @@ def load_multi_cfg(path: str | Path) -> List[Dict[str, Any]]:
     combos = uniq
 
     # 5) stable ordering so we reuse engines
-    combos.sort(key=lambda d: (d["backend"], d["hf_model"]))
+    combos.sort(key=lambda d: (d["backend"], d["hf_model"]["name"]))
     return combos
 
 # ───────────────────────── smoke-test

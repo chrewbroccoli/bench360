@@ -128,6 +128,8 @@ def _stem(cfg: Dict[str, Any]) -> str:
     parts = [
         cfg["backend"],
         cfg["model_name"],
+        str(cfg["hf_model"]["top_p"]),
+        str(cfg["hf_model"]["temperature"]),
         cfg["task"],
         cfg["scenario"],
     ]
@@ -259,13 +261,23 @@ def _multi_run_cycle(
 
     with progress:
         for idx, cfg in enumerate(runs, 1):
+            hf_model_cfg = cfg["hf_model"]
+            model_repo = hf_model_cfg["name"]
+            temperature = hf_model_cfg.get("temperature")
+            top_p = hf_model_cfg.get("top_p")
+            max_tokens = hf_model_cfg.get("max_tokens")
+
+            raw_name = cfg.get("model_name", model_repo)
+            cfg["model_name"] = str(raw_name).rsplit("/", 1)[-1]
+
             console.print(
-                f"Configuration: {cfg['backend']}/{cfg['model_name']} {cfg['task']}:{cfg['scenario']} {_param_bundle(cfg)}"
+                f"Configuration: {cfg['backend']}/{cfg['model_name']} "
+                f"{cfg['task']}:{cfg['scenario']} {_param_bundle(cfg)}"
             )
             desc = f"{cfg['backend']}/{cfg['model_name']} {cfg['task']}:{cfg['scenario']} {_param_bundle(cfg)}"
             progress.update(task_id, description=desc)
 
-            key = (cfg["backend"], cfg["hf_model"])
+            key = (cfg["backend"], cfg["hf_model"]["name"])
             if key != active_key:
                 if current is not None:
                     current.iec.close()
@@ -273,7 +285,10 @@ def _multi_run_cycle(
                 current = ModelBenchmark(
                     backend=cfg["backend"],
                     model_name=cfg["model_name"],
-                    model_path=cfg["hf_model"],
+                    model_path=model_repo,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
                     verbose=verbose,
                 )
                 active_key = key

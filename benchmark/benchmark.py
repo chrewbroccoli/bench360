@@ -47,6 +47,9 @@ class ModelBenchmark:
         backend="tgi",
         model_name="",
         model_path=None,
+        temperature: float = 0.6,
+        top_p: float = 0.95,
+        max_tokens: int = 128,
         verbose=False
     ):
         if backend not in ("tgi", "mii", "sglang", "vllm", "lmdeploy", "llamacpp"):
@@ -59,6 +62,9 @@ class ModelBenchmark:
         self.verbose = verbose
         self.iec = InferenceEngineClient()
         self.api = HfApi()
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_tokens = max_tokens
 
         # GPU monitoring setup
         if self.device == "cuda":
@@ -175,7 +181,7 @@ class ModelBenchmark:
 
 
     def generate(self, prompts):
-        return self.iec.completion(prompts)
+        return self.iec.completion(prompts, temperature=self.temperature, top_p=self.top_p, max_tokens=self.max_tokens)
 
     def _generate_and_time(self, prompt):
         """
@@ -240,8 +246,11 @@ class ModelBenchmark:
         self.model_size = self.get_model_size(self.model_path)
 
         meta = {
-            "model_name":   self.model_name,
+            "model_name":    self.model_name,
             "model_size_mb": self.model_size,
+            "temperature":   self.temperature,
+            "top_p":         self.top_p,
+            "max_tokens":    self.max_tokens,
             "task":          task,
             "scenario":      scenario,
             "backend":       self.backend,
