@@ -276,6 +276,8 @@ def _multi_run_cycle(
             )
             desc = f"{cfg['backend']}/{cfg['model_name']} {cfg['task']}:{cfg['scenario']} {_param_bundle(cfg)}"
             progress.update(task_id, description=desc)
+            print("max_tokens")
+            print(max_tokens)
 
             key = (cfg["backend"], cfg["hf_model"]["name"])
             if key != active_key:

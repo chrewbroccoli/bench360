@@ -4,7 +4,7 @@ import gzip
 import glob
 import random
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Literal, Optional
 
 from benchmark.utils import normalize_answer
 from benchmark.tasks.base_task import BaseTask
@@ -13,45 +13,30 @@ from benchmark.tasks.base_task import BaseTask
 class InfoExtractionTask(BaseTask):
     """
     Task for field extraction on the VRDU dataset.
-
-    Assumes the following layout under base_path (default: ./datasets/vrdu-main):
-
-        ./datasets/vrdu-main/
-          registration-form/
-            main/
-              dataset.jsonl.gz  (or dataset.jsonl)
-              pdfs/
-              meta.json
-          ad-buy-form/
-            main/
-              dataset.jsonl.gz  (or dataset.jsonl)
-              pdfs/
-              meta.json
-            few_shot-splits/   (optional)
-
-    Each JSONL line is expected to contain OCR and annotations. We extract:
-      - OCR text -> prompt context
-      - annotated field names + values -> target JSON the model must output
     """
 
-    def __init__(self, base_path: str = "./datasets/vrdu-main", seed: int = 42,
+    def __init__(self, base_path: str = "./datasets/vrdu-main",
+                 dataset_name: Optional[Literal["ad-buy", "registration"]] = None,
+                 seed: int = 42,
                  max_chars_context: int = 5000, max_fields: int = 30):
-        """
-        Args:
-            base_path: Root of the VRDU dataset (contains *-form/ subfolders).
-            seed: RNG seed for reproducibility.
-            max_chars_context: Cap the OCR context length in prompts.
-            max_fields: Cap number of fields per document to keep prompts reasonable.
-        """
         super().__init__()
         random.seed(seed)
         self.base_path = base_path
         self.max_chars_context = max_chars_context
         self.max_fields = max_fields
 
-        # Load and cache all entries across present corpora.
+        # Define which folders to look for
+        if dataset_name:
+            # Construct the specific folder name (e.g., "ad-buy-form")
+            search_pattern = os.path.join(self.base_path, f"{dataset_name}-form")
+        else:
+            # Fallback to original behavior (all folders)
+            search_pattern = os.path.join(self.base_path, "*-form")
+
         self.entries: List[Dict[str, Any]] = []
-        for corpus_dir in sorted(glob.glob(os.path.join(self.base_path, "*-form"))):
+
+        # glob.glob will now only find the specific folder if dataset_name is set
+        for corpus_dir in sorted(glob.glob(search_pattern)):
             main_dir = os.path.join(corpus_dir, "main")
             if not os.path.isdir(main_dir):
                 continue
@@ -62,151 +47,165 @@ class InfoExtractionTask(BaseTask):
 
         if not self.entries:
             raise FileNotFoundError(
-                f"No VRDU entries found under {self.base_path}. "
-                "Make sure dataset.jsonl(.gz) exists under */main/"
+                f"No VRDU entries found matching: {search_pattern}"
             )
 
     # ----------------------------
     # BaseTask API
     # ----------------------------
-    def generate_prompts(self, num_examples: int = 100) -> Tuple[List[str], List[str]]:
+    def generate_prompts(self, num_examples: int = 100) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Returns:
-            prompts: list[str] — each prompt instructs the model to output JSON with field->value(s)
+            prompts: list[dict] — each dict has {"message": [ {role, content}, ... ]}
             references: list[str] — JSON strings representing the gold field->value(s) mapping
         """
         sample = random.sample(self.entries, k=min(num_examples, len(self.entries)))
-        prompts: List[str] = []
+        prompts: List[Dict[str, Any]] = []
         references: List[str] = []
 
         for ex in sample:
             fields_to_values = self._extract_gold_fields(ex)
             if not fields_to_values:
-                # Skip documents with no annotations
                 continue
 
-            # Limit number of fields to keep prompt compact
             trimmed_fields = dict(list(fields_to_values.items())[: self.max_fields])
-
             ocr_text = self._extract_ocr_text(ex, max_chars=self.max_chars_context)
 
-            prompt = self._build_prompt(ocr_text, list(trimmed_fields.keys()))
+            messages = self._build_prompt(ocr_text, list(trimmed_fields.keys()))
             ref_json = json.dumps(trimmed_fields, ensure_ascii=False, sort_keys=True)
 
-            prompts.append(prompt)
+            # IMPORTANT: matches your router: dict with at least one "message"
+            prompts.append({"message": messages})
             references.append(ref_json)
 
         return prompts, references
 
     def quality_metrics(self, generated: str, reference: str) -> Dict[str, float]:
         """
-        Evaluate model JSON output versus gold JSON (strict JSON strings).
-
-        Metrics returned:
-          - subset_em: 1.0 if every gold field exactly matches (after normalization)
-          - field_em: micro-avg per-field exact match (set equality after normalization)
-          - field_f1: micro-avg per-field token F1 (existing behavior)
-          - field_substring: micro-avg per-field substring match (gold fully contained in any pred)
-          - field_fuzzy: micro-avg per-field fuzzy similarity (best SequenceMatcher ratio)
+        Calculates the F1 score based on Exact Match logic for the JSON object.
         """
+        # Parse inputs
         gold = self._safe_json_loads(reference)
         pred = self._safe_json_loads(generated)
 
-        # Ensure dicts
         if not isinstance(gold, dict):
             gold = {}
         if not isinstance(pred, dict):
             pred = {}
 
-        gold_fields = set(gold.keys())
+        tp = 0
+        fp = 0
+        fn = 0
 
-        per_field_em: List[float] = []
-        per_field_f1: List[float] = []
-        per_field_sub: List[float] = []
-        per_field_fuzzy: List[float] = []
-
-        for f in gold_fields:
-            gold_vals = self._to_list_of_str(gold.get(f, []))
-            pred_vals = self._to_list_of_str(pred.get(f, []))
-
-            # If model omitted the field entirely, score zeros across metrics.
-            if len(pred_vals) == 0:
-                per_field_em.append(0.0)
-                per_field_f1.append(0.0)
-                # substring: only 1.0 if gold also empty
-                per_field_sub.append(1.0 if len(gold_vals) == 0 else 0.0)
-                # fuzzy: define as 1.0 only if both empty, else 0
-                per_field_fuzzy.append(1.0 if len(gold_vals) == 0 else 0.0)
+        # 1. Evaluate keys present in Ground Truth
+        for key, gt_val in gold.items():
+            # Skip empty gold values
+            if gt_val in [None, ""]:
                 continue
 
-            # Exact match (set equality after normalization)
-            per_field_em.append(self._field_exact_em(gold_vals, pred_vals))
+            pred_val = pred.get(key)
 
-            # Token F1 (existing semantics)
-            per_field_f1.append(self._field_token_f1(gold_vals, pred_vals))
+            if pred_val in [None, ""]:
+                # Key exists in Gold but missing/empty in Prediction -> False Negative
+                fn += 1
+            else:
+                # Both exist, check for match (Exact Match Logic)
+                # Normalize to lists of strings for robust comparison
 
-            # Substring match (gold fully contained in any prediction)
-            per_field_sub.append(self._field_substring_match(gold_vals, pred_vals))
+                # Handle Ground Truth
+                if isinstance(gt_val, (str, int, float, bool)):
+                    norm_gt = [str(gt_val)]
+                elif isinstance(gt_val, list):
+                    norm_gt = [str(v) for v in gt_val]
+                else:
+                    norm_gt = [str(gt_val)]  # Fallback
 
-            # Fuzzy similarity (best SequenceMatcher ratio per gold, then average)
-            per_field_fuzzy.append(self._field_fuzzy_similarity(gold_vals, pred_vals))
+                # Handle Prediction
+                if isinstance(pred_val, (str, int, float, bool)):
+                    norm_pred = [str(pred_val)]
+                elif isinstance(pred_val, list):
+                    norm_pred = [str(v) for v in pred_val]
+                else:
+                    norm_pred = [str(pred_val)]  # Fallback
 
-        field_em = sum(per_field_em) / len(per_field_em) if per_field_em else 0.0
-        field_f1 = sum(per_field_f1) / len(per_field_f1) if per_field_f1 else 0.0
-        field_substring = sum(per_field_sub) / len(per_field_sub) if per_field_sub else 0.0
-        field_fuzzy = sum(per_field_fuzzy) / len(per_field_fuzzy) if per_field_fuzzy else 0.0
-        subset_em = 1.0 if field_em == 1.0 else 0.0
+                # Sort to ignore order in lists
+                if sorted(norm_gt) == sorted(norm_pred):
+                    tp += 1
+                else:
+                    # Value mismatch -> False Positive
+                    fp += 1
 
+        # 2. Handle Extra Keys in Predictions (Hallucinations)
+        for pred_key in pred:
+            if pred_key not in gold:
+                # Only count if the prediction actually has a value
+                if pred.get(pred_key) not in [None, ""]:
+                    fp += 1
+
+        # 3. Calculate F1
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        # Note: subset_em is strictly 1.0 only if F1 is 1.0 (perfect match)
+        subset_em = 1.0 if f1 == 1.0 else 0.0
+
+        # For backward compatibility or extra info, we can keep average field stats if needed,
+        # but here we follow the requested overwrite logic.
         return {
             "subset_em": subset_em,
-            "field_em": field_em,
-            "field_f1": field_f1,
-            "field_substring": field_substring,
-            "field_fuzzy": field_fuzzy,
+            "field_f1": f1,
+            # We can zero out or remove the fuzzy/substring metrics if they are no longer needed
+            # or implement them similarly if required.
+            "field_em": precision,  # Using precision as a proxy for field_em in this context
+            "field_substring": 0.0,
+            "field_fuzzy": 0.0,
         }
 
     # ----------------------------
-    # Prompting
+    # Prompting (CHAT)
     # ----------------------------
-    def _build_prompt(self, ocr_text: str, fields: List[str]) -> str:
-        """ Construct a compact, deterministic prompt. The model must output strict JSON only, formatted as a single line (no newlines or indentation). """
+    def _build_prompt(self, ocr_text: str, fields: List[str]) -> List[Dict[str, str]]:
+        """
+        Construct chat messages.
+        The model must output strict JSON only, formatted as a single line.
+        """
+        fields_str = ", ".join(fields)
 
         system_message = (
-            "You extract structured fields from OCR text of a document.\n"
-            "Output strictly a single JSON object with ONLY the requested keys.\n"
-            "If a field is present multiple times, output a JSON array of unique values in reading order.\n"
-            "Do not include extra commentary, explanations, or keys.\n"
-            "The JSON must be compact and on a single line (no line breaks or spaces beyond those inside values)."
+            # "/no_think \n"
+            "You are an information extraction engine.\n"
+            "Your task is to read OCR text from a document and extract specific fields.\n"
+            "You must output ONLY one JSON object, with EXACTLY the requested keys.\n"
+            "Rules:\n"
+            "  - The JSON must be on a single line (no line breaks or indentation).\n"
+            "  - Each requested key MUST be present in the JSON.\n"
+            "  - If a field appears multiple times, use a JSON array of unique values in reading order.\n"
+            "  - If a field is not present in the OCR text, set its value to null.\n"
+            "  - Do NOT add any keys that were not requested.\n"
+            "  - Do NOT output any explanations, comments, or text outside the JSON object.\n"
         )
 
-        examples = (
-            "### EXAMPLE\n"
+        user_task = (
+            "Extract the requested keys from the OCR\n"
             "OCR:\n"
-            "Invoice # 12345 | Date: 2023-08-01 | Total: $19.99\n"
-            "Vendor: ACME Corp.\n"
+            f"{ocr_text}\n"
             "\n"
             "Requested keys:\n"
-            "invoice_number, date, total_amount, vendor\n\n"
-            "Your JSON (single line):\n"
-            '{"invoice_number":"12345","date":"2023-08-01","total_amount":"$19.99","vendor":"ACME Corp."}\n')
-
-        instruction = (
-            "### INSTRUCTION\n" "Read the OCR text and return a JSON with EXACTLY these keys:\n"
-            f"{', '.join(fields)}\n\n" "Rules:\n"
-            " • Return strings for single values, and arrays for repeated values.\n"
-            " • Preserve numbers/dates as they appear when reasonable.\n"
-            " • If a key truly cannot be found, set it to null.\n"
-            " • Output must be a single-line JSON string with no extra whitespace or newlines.\n")
-
-        input_block = (
-            "### OCR\n" f"{ocr_text}\n\n" "### OUTPUT (JSON only, one line)\n"
+            f"{fields_str}\n"
+            "\n"
+            "Output JSON (single line, no extra text):"
         )
-        return f"{system_message}\n\n{examples}\n\n{instruction}\n{input_block}"
+
+        return [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_task},
+        ]
+
     # ----------------------------
     # Utilities: loading & parsing
     # ----------------------------
     def _pick_jsonl(self, main_dir: str) -> Union[str, None]:
-        """Prefer .jsonl.gz if present, else .jsonl."""
         gz = os.path.join(main_dir, "dataset.jsonl.gz")
         jl = os.path.join(main_dir, "dataset.jsonl")
         if os.path.isfile(gz):
@@ -216,7 +215,6 @@ class InfoExtractionTask(BaseTask):
         return None
 
     def _read_jsonl(self, path: str) -> List[Dict[str, Any]]:
-        """Read (gzipped) JSONL into a list of dicts."""
         entries = []
         opener = gzip.open if path.endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8") as f:
@@ -231,80 +229,152 @@ class InfoExtractionTask(BaseTask):
                     continue
         return entries
 
-    def _extract_ocr_text(self, ex: Dict[str, Any], max_chars: int = 4000) -> str:
+    def _extract_ocr_text(
+            self,
+            ex: Dict[str, Any],
+            max_chars: int = 14000,
+            *,
+            mode: str = "page",  # "page" or "item"
+            prefer_levels: Tuple[str, ...] = ("blocks", "paragraphs", "lines"),
+            dedupe: bool = True,
+            dedupe_scope: str = "document",  # "document" or "page"
+            add_page_headers: bool = True,
+    ) -> str:
         """
-        Best-effort OCR extraction across possible formats.
+        Production-ready OCR-to-context renderer for LLM IE.
         """
-        ocr = ex.get("ocr")
+        ocr = ex.get("ocr") or {}
+        if not isinstance(ocr, dict):
+            s = str(ocr)
+            return (s[:max_chars] + " …") if len(s) > max_chars else s
 
-        def textify(obj) -> List[str]:
-            out = []
-            if isinstance(obj, str):
-                out.append(obj)
-            elif isinstance(obj, dict):
-                # common keys
-                if "text" in obj and isinstance(obj["text"], str):
-                    out.append(obj["text"])
-                # hierarchical
-                for k in ("pages", "lines", "tokens", "blocks", "spans", "words", "items"):
-                    if k in obj and isinstance(obj[k], list):
-                        for item in obj[k]:
-                            out.extend(textify(item))
-            elif isinstance(obj, list):
-                for item in obj:
-                    if isinstance(item, str):
-                        out.append(item)
-                    elif isinstance(item, dict):
-                        if "text" in item and isinstance(item["text"], str):
-                            out.append(item["text"])
+        pages = ocr.get("pages")
+        if not isinstance(pages, list) or not pages:
+            t = " ".join(str(ocr.get("text", "")).split())
+            return (t[:max_chars] + " …") if len(t) > max_chars else t
+
+        out_parts: List[str] = []
+        total = 0
+
+        def add(s: str) -> bool:
+            nonlocal total
+            if not s:
+                return True
+            if total + len(s) > max_chars:
+                remaining = max_chars - total
+                if remaining > 0:
+                    out_parts.append(s[:remaining] + " …")
+                return False
+            out_parts.append(s)
+            total += len(s)
+            return True
+
+        def pick_items(page: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+            for key in prefer_levels:
+                v = page.get(key)
+                if isinstance(v, list) and v:
+                    items = [
+                        it for it in v
+                        if isinstance(it, dict) and isinstance(it.get("text"), str) and it.get("text").strip()
+                    ]
+                    if items:
+                        return items
+            return None
+
+        def sort_reading(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            def key_fn(it: Dict[str, Any]):
+                bbox = it.get("bbox")
+                if isinstance(bbox, list) and len(bbox) >= 4:
+                    x0, y0, x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
+                    return (y0, x0, y1, x1)
+                return (1e9, 1e9, 1e9, 1e9)
+
+            return sorted(items, key=key_fn)
+
+        # Dedupe state
+        seen_doc = set()
+
+        for pi, p in enumerate(pages, start=1):
+            if not isinstance(p, dict):
+                continue
+
+            items = pick_items(p)
+            if not items:
+                continue
+            items = sort_reading(items)
+
+            seen_page = set()
+
+            if add_page_headers:
+                if not add(f"[PAGE {pi}]\n"):
+                    break
+
+            if mode == "page":
+                buf: List[str] = []
+                for it in items:
+                    text = " ".join(it.get("text", "").split())
+                    if not text:
+                        continue
+
+                    if dedupe:
+                        sig = text.casefold()
+                        if dedupe_scope == "page":
+                            if sig in seen_page:
+                                continue
+                            seen_page.add(sig)
                         else:
-                            out.extend(textify(item))
-                    elif isinstance(item, (list, tuple)) and len(item) >= 1:
-                        # e.g., ["text", [bbox]]
-                        if isinstance(item[0], str):
-                            out.append(item[0])
-            return out
+                            if sig in seen_doc:
+                                continue
+                            seen_doc.add(sig)
 
-        chunks = textify(ocr)
-        text = " ".join(chunks)
-        text = " ".join(text.split())  # squish whitespace
-        if len(text) > max_chars:
-            text = text[:max_chars] + " …"
-        return text
+                    buf.append(text)
+
+                chunk = " ".join(buf).strip()
+                if chunk:
+                    if not add(chunk + "\n"):
+                        break
+
+            else:  # mode == "item"
+                for it in items:
+                    text = " ".join(it.get("text", "").split())
+                    if not text:
+                        continue
+
+                    if dedupe:
+                        sig = text.casefold()
+                        if dedupe_scope == "page":
+                            if sig in seen_page:
+                                continue
+                            seen_page.add(sig)
+                        else:
+                            if sig in seen_doc:
+                                continue
+                            seen_doc.add(sig)
+
+                    if not add(text + "\n"):
+                        break
+                else:
+                    continue
+                break
+
+        return "".join(out_parts)
 
     def _extract_gold_fields(self, ex: Dict[str, Any]) -> Dict[str, Union[str, List[str]]]:
         """
         Parse annotations into {field_name: value or [values]}.
-
-        Handles:
-          - annotations as dict: {field: [[text, bbox], ...]} or {field: ["text", ...]}
-          - annotations as list: [[field, [[text, bbox], ...]], ...]
-          - values possibly split across spans -> joined in reading order
-          - FIXES:
-              * collapse repeated runs inside a scalar ("A A A" -> "A")
-              * exact de-dup on lists (after cleanup)
-              * collapse single-item lists to scalars
         """
         ann = ex.get("annotations")
         if ann is None:
             return {}
 
         def spans_to_values(spans) -> List[str]:
-            """
-            Normalize one field's annotation bundle to a list of 0..N string values.
-            - If 'spans' is a flat list of text fragments -> produce ONE concatenated value.
-            - If 'spans' looks like a list of instances (each instance is a list/tuple of fragments)
-              -> produce multiple values (one per instance).
-            Repeated chunk runs inside a value are collapsed (e.g., "X X X" -> "X").
-            """
             vals: List[str] = []
             if not isinstance(spans, list):
                 return vals
 
-            # Heuristic: list of instances?
             is_list_of_instances = (
-                spans
-                and all(isinstance(it, (list, tuple)) and any(self._span_text(p) for p in it) for it in spans)
+                    spans
+                    and all(isinstance(it, (list, tuple)) and any(self._span_text(p) for p in it) for it in spans)
             )
 
             if is_list_of_instances:
@@ -318,7 +388,6 @@ class InfoExtractionTask(BaseTask):
                             vals.append(s)
                 return vals
 
-            # Flat list -> single instance
             pieces = [self._span_text(s) for s in spans if self._span_text(s)]
             if pieces:
                 s = " ".join(pieces)
@@ -338,7 +407,6 @@ class InfoExtractionTask(BaseTask):
                 out[field] = vals if len(vals) > 1 else vals[0]
 
         elif isinstance(ann, list):
-            # list of [field, spans] pairs
             for item in ann:
                 if not (isinstance(item, (list, tuple)) and len(item) >= 2):
                     continue
@@ -354,7 +422,6 @@ class InfoExtractionTask(BaseTask):
                 else:
                     out[field] = vals if len(vals) > 1 else vals[0]
 
-        # Cleanup + exact de-dup + collapse singletons
         cleaned: Dict[str, Union[str, List[str]]] = {}
         for k, v in out.items():
             if isinstance(v, list):
@@ -362,12 +429,12 @@ class InfoExtractionTask(BaseTask):
                 for s in v:
                     s2 = " ".join(s.split())
                     s2 = self._collapse_repeated_runs(s2)
-                    if s2 and s2 not in seen:  # exact de-dup only
+                    if s2 and s2 not in seen:
                         seen.append(s2)
                 if len(seen) == 0:
-                    continue  # drop empty fields
+                    continue
                 if len(seen) == 1:
-                    cleaned[k] = seen[0]  # collapse singleton list to scalar
+                    cleaned[k] = seen[0]
                 else:
                     cleaned[k] = seen
             else:
@@ -377,30 +444,21 @@ class InfoExtractionTask(BaseTask):
         return cleaned
 
     # ----------------------------
-    # Utilities: helpers (no fuzzy logic here)
+    # Utilities: helpers
     # ----------------------------
     @staticmethod
     def _span_text(x) -> str:
-        """Extract textual content from a span element in various shapes."""
         if isinstance(x, str):
             return x
         if isinstance(x, dict):
             t = x.get("text")
             return t if isinstance(t, str) else ""
         if isinstance(x, (list, tuple)) and x and isinstance(x[0], str):
-            # e.g., ["text", bbox, ...]
             return x[0]
         return ""
 
     @staticmethod
     def _collapse_repeated_runs(s: str, max_k: int = 8) -> str:
-        """
-        Collapse exact repeated runs of a token sequence:
-        "A A A" -> "A"
-        "John Doe John Doe" -> "John Doe"
-        "$20,650.00 $20,650.00 $20,650.00" -> "$20,650.00"
-        Works at token level to preserve multi-word phrases.
-        """
         toks = s.split()
         n = len(toks)
         if n <= 1:
@@ -414,9 +472,6 @@ class InfoExtractionTask(BaseTask):
                 return " ".join(chunk)
         return s
 
-    # ----------------------------
-    # Utilities: metrics
-    # ----------------------------
     def _safe_json_loads(self, s: str) -> Any:
         try:
             return json.loads(s)
@@ -425,7 +480,7 @@ class InfoExtractionTask(BaseTask):
                 start = s.find("{")
                 end = s.rfind("}")
                 if start != -1 and end != -1 and end > start:
-                    return json.loads(s[start : end + 1])
+                    return json.loads(s[start: end + 1])
             except Exception:
                 pass
         return {}
@@ -437,99 +492,10 @@ class InfoExtractionTask(BaseTask):
             return [str(x) for x in v]
         return [str(v)]
 
-    def _token_f1(self, gold: str, preds: List[str]) -> float:
-        """Max token F1 between one gold value and a list of predicted candidates."""
-        def toks(s: str) -> List[str]:
-            return normalize_answer(s).split()
-
-        g = toks(gold)
-        if not g:
-            return 1.0 if not any(toks(p) for p in preds) else 0.0
-
-        best = 0.0
-        for p in preds:
-            pt = toks(p)
-            if not pt:
-                best = max(best, 0.0)
-                continue
-            common = set(g) & set(pt)
-            if not common:
-                best = max(best, 0.0)
-                continue
-            precision = len(common) / len(pt)
-            recall = len(common) / len(g)
-            f1 = 2 * precision * recall / (precision + recall)
-            best = max(best, f1)
-        return best
-
-    def _normalize_list(self, vals: List[str]) -> List[str]:
-        """Normalize a list of strings using the benchmark normalize_answer."""
-        return [normalize_answer(v) for v in vals if v is not None]
-
-    def _field_exact_em(self, gold_vals: List[str], pred_vals: List[str]) -> float:
-        """
-        Exact match at field level:
-        - Normalize values
-        - Compare as sets (order/dupes ignored)
-        """
-        gold_norm = set(self._normalize_list(gold_vals))
-        pred_norm = set(self._normalize_list(pred_vals))
-        return 1.0 if gold_norm == pred_norm else 0.0
-
-    def _field_token_f1(self, gold_vals: List[str], pred_vals: List[str]) -> float:
-        """
-        Per-field token F1:
-        - If gold empty: 1 if pred empty else 0
-        - Else: for each gold value, take max token F1 vs all preds, then average
-        """
-        if len(gold_vals) == 0:
-            return 1.0 if len(pred_vals) == 0 else 0.0
-        scores = [self._token_f1(gv, pred_vals) for gv in gold_vals]
-        return sum(scores) / len(scores) if scores else 0.0
-
-    def _field_substring_match(self, gold_vals: List[str], pred_vals: List[str]) -> float:
-        """
-        Substring Match:
-        Each gold value must appear as a full, contiguous substring in at least
-        one predicted value (after normalization). We average over gold values.
-        """
-        gold_norm = self._normalize_list(gold_vals)
-        pred_norm = self._normalize_list(pred_vals)
-
-        if not gold_norm:
-            return 1.0 if not pred_norm else 0.0
-
-        def contained(g: str) -> float:
-            return 1.0 if any(g in p for p in pred_norm) else 0.0
-
-        scores = [contained(g) for g in gold_norm]
-        return sum(scores) / len(scores)
-
-    def _field_fuzzy_similarity(self, gold_vals: List[str], pred_vals: List[str]) -> float:
-        """
-        Fuzzy similarity metric (kept for evaluation only).
-        """
-        gold_norm = self._normalize_list(gold_vals)
-        pred_norm = self._normalize_list(pred_vals)
-
-        if not gold_norm:
-            return 1.0 if not pred_norm else 0.0
-        if not pred_norm:
-            return 0.0
-
-        def best_ratio(g: str) -> float:
-            best = 0.0
-            for p in pred_norm:
-                best = max(best, SequenceMatcher(None, g, p).ratio())
-            return best
-
-        scores = [best_ratio(g) for g in gold_norm]
-        return sum(scores) / len(scores)
-
 
 if __name__ == "__main__":
     task = InfoExtractionTask(base_path="../../datasets/vrdu-main", seed=42)
     prompts, references = task.generate_prompts(num_examples=3)
     for i in range(len(prompts)):
-        print(f"Prompt {i+1}:\n{prompts[i]}\n")
-        print(f"Reference {i+1}:\n{references[i]}\n")
+        print(f"Prompt {i + 1}:\n{prompts[i]}\n")
+        print(f"Reference {i + 1}:\n{references[i]}\n")

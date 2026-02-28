@@ -1,0 +1,14 @@
+backend:
+  #- llamacpp
+  - vllm
+  - sglang
+hf_model:
+  - name: "mistralai/Mistral-7B-Instruct-v0.3"
+    temperature: 0.2
+    top_p: 0.8
+    max_tokens: 128
+task: ie
+scenario: single
+#batch_size: 16
+#batch processing
+samples: 10

@@ -2,13 +2,12 @@ import os
 import subprocess
 import time
 import requests
-from pathlib import Path
 import httpx
 from benchmark.utils import _start_log_tailer
 
 class InferenceEngineClient:
     """
-    Wrapper for an OpenAI‐compatible server. 
+    Wrapper for an OpenAI‐compatible server.
     launch() will call your existing launch_engine.sh script (which runs Docker in the foreground),
     then poll /v1/completions every second until it returns 200.
     """
@@ -19,14 +18,12 @@ class InferenceEngineClient:
         self._launcher_proc = None
         self.model = None
 
-    
-
     def launch(self, backend: str, model: str, timeout: float = 500.0):
         """
         1) Starts your existing launch_engine.sh in a Popen (non-blocking).
         2) Polls `http://127.0.0.1:23333/v1/models` every 2 seconds
            until the desired model shows up (or timeout).
-        
+
         :param backend: One of {tgi, vllm, mii, sglang, lmdeploy, llamacpp}
         :param model: HF model ID or local path
         :param timeout: Max seconds to wait for the model to appear before raising.
@@ -45,10 +42,10 @@ class InferenceEngineClient:
         ]
         self._launcher_proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,          # ⟵ was DEVNULL
-            stderr=subprocess.STDOUT,        # merge both streams
+            stdout=subprocess.PIPE,  # ⟵ was DEVNULL
+            stderr=subprocess.STDOUT,  # merge both streams
             text=True,
-            bufsize=1                        # line-buffered
+            bufsize=1  # line-buffered
         )
 
         # Start a daemon thread to read the launcher output
@@ -66,10 +63,12 @@ class InferenceEngineClient:
                 )
 
             try:
+                print("trying to get model")
                 resp = requests.get(list_url, timeout=2.0)
                 if resp.status_code == 200:
                     data = resp.json().get("data", [])
                     # Check if our model_id is in the loaded list
+                    print(data)
                     for entry in data:
                         if entry.get("id").lower() == model.lower() or ".gguf" in entry.get("id"):
                             # Model is loaded and ready to serve
@@ -87,35 +86,51 @@ class InferenceEngineClient:
                 )
             time.sleep(2.0)
 
+    def completion(self, prompt, max_tokens, model=None, temperature=0.1, top_p=0.9, stream=False):
+        model_to_use = model or self.model
 
-
-    def completion(
-        self,
-        prompt,
-        model: str | None = None,
-        temperature: float = 0.1,
-        max_tokens: int = 256,
-        top_p: float = 0.9,
-        stream: bool = False,
-    ):
-        """
-        Send one or more prompts. :param prompt: string or list[str]
-        """
-        model = model
+        # batch? (benchmark passes list)
         is_batch = isinstance(prompt, (list, tuple))
+        first = prompt[0] if is_batch and prompt else prompt
 
+        # route dict-with-message -> chat.completions
+        if isinstance(first, dict) and first.get("message"):
+            messages = first["message"]
+            if isinstance(messages, dict):
+                messages = [messages]
+
+            resp = self.client.chat.completions.create(
+                model=model_to_use,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                stream=stream,
+                extra_body={
+                    'chat_template_kwargs': {'enable_thinking': False}
+                },
+                response_format={"type": "json_object"}  # or json_schema if supported
+            )
+            print(resp.choices[0].message)
+            print("-------")
+            if stream:
+                return resp
+            text = resp.choices[0].message.content or ""
+            return [text] if is_batch else text
+
+        # otherwise: normal completions
         resp = self.client.completions.create(
-            model=self.model,
-            prompt=prompt[0],
+            model=model_to_use,
+            prompt=first if is_batch else prompt,
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,
             stream=stream,
         )
 
+        print(resp)
         if stream:
             return resp
-
         texts = [c.text for c in resp.choices]
         return texts if is_batch else texts[0]
 
@@ -218,7 +233,6 @@ class InferenceEngineClient:
             self.client.close()
         except Exception:
             pass
-
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import re, string
-from typing import Dict
+from typing import Any, Dict, Iterable
 from collections import deque
 import threading
 from threading import Thread
@@ -55,24 +55,44 @@ def normalize_answer(s: str) -> str:
     s = ' '.join(s.split())
     return s
 
-def clean_prediction(prediction: list[str]) -> list[str]:
-    cleaned = []
-    for raw in prediction:
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+def _to_text(x: Any) -> str:
+    # Accept either strings or objects like ChatCompletionMessage(content=...)
+    if isinstance(x, str):
+        return x
+    content = getattr(x, "content", None)
+    if isinstance(content, str):
+        return content
+    # Fallback: last resort string conversion
+    return "" if x is None else str(x)
+
+def _strip_think_blocks(text: str) -> str:
+    # Remove all <think>...</think> blocks (including multiline)
+    return _THINK_BLOCK_RE.sub("", text)
+
+def clean_prediction(prediction: Iterable[Any]) -> list[str]:
+    cleaned: list[str] = []
+
+    for item in prediction:
+        raw = _to_text(item)
+
+        # 0) Remove <think>...</think> blocks + trim again
+        ans = _strip_think_blocks(raw).strip()
+
         # 1) Remove anything after the first '###'
-        ans = raw.split("###", 1)[0]
+        ans = ans.split("###", 1)[0].strip()
 
-        # 2) Strip whitespace (including newlines) from both ends
-        ans = ans.strip()
-
-        # 3) If the whole thing is valid JSON, return a one-line JSON string
+        # 2) If the whole thing is valid JSON, return a one-line JSON string
         try:
             obj = json.loads(ans)
             ans = json.dumps(obj, separators=(",", ":"))  # minified, single line
         except json.JSONDecodeError:
-            # 4) Not JSON: remove anything after the first newline
-            ans = ans.split("\n", 1)[0]
+            # 3) Not JSON: remove anything after the first newline
+            ans = ans.split("\n", 1)[0].strip()
 
         cleaned.append(ans)
+
     return cleaned
 
 

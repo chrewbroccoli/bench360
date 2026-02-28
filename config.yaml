@@ -1,6 +1,26 @@
-backend: tgi
-hf_model: Qwen/Qwen3-8B
-model_name: Qwen3-8B
-task: qa
+backend:
+  #- llamacpp
+  - vllm-vl
+  #- sglang
+hf_model:
+- name: "Qwen/Qwen3-VL-2B-Instruct"
+  temperature: 0.7
+  top_p: 0.8
+  max_tokens: 128
+- name: "Qwen/Qwen3-VL-4B-Instruct"
+  temperature: 0.7
+  top_p: 0.8
+  max_tokens: 128
+- name: "OpenGVLab/InternVL3_5-4B-Instruct"
+  temperature: 0.7
+  top_p: 0.8
+  max_tokens: 128
+- name: "Qwen/Qwen3-VL-8B-Instruct"
+  temperature: 0.7
+  top_p: 0.8
+  max_tokens: 128
+task: ie_vl_registration
 scenario: single
-samples: 10
+#batch_size: 16
+#batch processing
+samples: 500

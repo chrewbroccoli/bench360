@@ -1,38 +1,20 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# launch_engine  —  Launch one of several LLM inference engines via Docker
-#
-# Usage:
-#   ./launch_engine --engine=<engine> --model=<model>
-#
-#   <engine> ∈ { tgi | vllm | mii | sglang | lmdeploy | llamacpp}
-#   <model>  is the Hugging Face model ID (e.g. “mistralai/Mistral-7B-Instruct-v0.3”)
-#
-# Example:
-#   ./launch_engine --engine=tgi --model=mistralai/Mistral-7B-Instruct-v0.3
-#
-# Notes:
-#   • Expects HF_TOKEN or HUGGING_FACE_HUB_TOKEN in your environment.
-#   • Always listens on 127.0.0.1:23333 inside the container→host.
-#   • Uses $HOME/.cache/huggingface as cache Dir.
+# launch_engine  —  Launch LLM inference engines via Docker
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-# ─── Parse arguments “--engine=…” and “--model=…” ────────────────────────────
+# ─── Parse arguments ─────────────────────────────────────────────────────────
 ENGINE=""
 MODEL=""
 
 for ARG in "$@"; do
   case "$ARG" in
-    --engine=*)
-      ENGINE="${ARG#--engine=}"
-      ;;
-    --model=*)
-      MODEL="${ARG#--model=}"
-      ;;
+    --engine=*) ENGINE="${ARG#--engine=}" ;;
+    --model=*)  MODEL="${ARG#--model=}" ;;
     *)
       echo "Unknown argument: $ARG"
-      echo "Usage: $0 --engine=<tgi|vllm|mii|sglang|lmdeploy|llamacpp> --model=<your-org/your-model-name>"
+      echo "Usage: $0 --engine=<engine> --model=<model>"
       exit 1
       ;;
   esac
@@ -40,116 +22,116 @@ done
 
 if [[ -z "$ENGINE" || -z "$MODEL" ]]; then
   echo "Error: both --engine and --model must be provided."
-  echo "Usage: $0 --engine=<tgi|vllm|mii|sglang|lmdeploy|llamacpp> --model=<your-org/your-model-name>"
   exit 1
 fi
 
 # ─── Common variables ───────────────────────────────────────────────────────
 PORT=23333
 CACHE_DIR="$HOME/.cache/huggingface"
+  OUT_DIR="${OUT_DIR:-$HOME/models}"
+HF_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
 
-# Ensure at least one token is set
-if [[ -z "${HF_TOKEN:-}" && -z "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
-  echo "Error: You must export HF_TOKEN or HUGGING_FACE_HUB_TOKEN in your environment."
-  exit 1
-fi
-
-# ─── Select and run the requested engine ────────────────────────────────────
+# ─── Engine Selection ───────────────────────────────────────────────────────
 case "$ENGINE" in
 
-  # ──────────────────────────────────────────────────────────────
-  # llama.cpp backend (2-step: convert HF -> GGUF, then server)
-  # Example:
-  #   ENGINE=llamacpp \
-  #   MODEL_ID="mistralai/Mistral-7B-Instruct-v0.2" \
-  #   ./launch_engine.sh
-  # ──────────────────────────────────────────────────────────────
-  llamacpp)
-    # ===== CONFIG =====
-    MODEL_ID="${MODEL_ID:-${MODEL:-mistralai/Mistral-7B-Instruct-v0.2}}"
-    REVISION="${REVISION:-main}"
+llamacpp)
+  # ─── Configuration ────────────────────────────────────────────────────────
+  MODEL_ROOT="${OUT_DIR%/}/${MODEL//\//__}"
+  HF_DIR="${MODEL_ROOT}/hf"
 
-    # Where to store converted models
-    OUT_DIR="${OUT_DIR:-$HOME/models}"
+  LLAMACPP_SERVER_IMAGE="ghcr.io/ggml-org/llama.cpp:server-cuda"
+  LLAMACPP_FULL_IMAGE="ghcr.io/ggml-org/llama.cpp:full"
 
-    # outtype is what convert-hf-to-gguf uses: f16, f32, q4_0, q4_k_m, q8_0, ...
-    OUTTYPE="${OUTTYPE:-f16}"
+  # ─── 0. Check for existing GGUF or HF weights ─────────────────────────────
+  # Logic:
+  # 1. Look for ANY .gguf file (e.g., custom names like "qwen-q6.gguf").
+  # 2. If no GGUF is found, check for HF config.json.
+  # 3. If neither exists, download from Hugging Face.
 
-    # llama.cpp server settings
-    CTX="${CTX:-4096}"
-    BATCH="${BATCH:-512}"
-    N_GPU_LAYERS="${N_GPU_LAYERS:-99}"
+  # Find the first .gguf file in the directory (if any)
+  EXISTING_GGUF=$(find "${MODEL_ROOT}" -maxdepth 1 -name "*.gguf" -print -quit)
 
-    # Which server image to use (CPU vs CUDA)
-    LLAMACPP_FULL_IMAGE="${LLAMACPP_FULL_IMAGE:-ghcr.io/ggerganov/llama.cpp:full}"
-    LLAMACPP_SERVER_IMAGE="${LLAMACPP_SERVER_IMAGE:-ghcr.io/ggerganov/llama.cpp:server-cuda}"
+  if [[ -z "${EXISTING_GGUF}" && ! -f "${HF_DIR}/config.json" ]]; then
+    echo "[llamacpp] Neither HF weights nor any GGUF found in ${MODEL_ROOT}"
+    echo "[llamacpp] Downloading '${MODEL}' via huggingface-cli..."
 
-    # ===== PREP =====
-    command -v docker >/dev/null || { echo "docker not found"; exit 1; }
-    command -v huggingface-cli >/dev/null || { echo "huggingface-cli not found (pip install -U huggingface-hub)"; exit 1; }
-
-    SAFE_NAME="${MODEL_ID//\//__}"
-    MODEL_ROOT="${OUT_DIR%/}/${SAFE_NAME}"
-    HF_DIR="${MODEL_ROOT}/hf"
-    mkdir -p "$HF_DIR"
-
-    echo "[llamacpp] MODEL_ID=$MODEL_ID"
-    echo "[llamacpp] REVISION=$REVISION"
-    echo "[llamacpp] OUT_DIR=$OUT_DIR"
-    echo "[llamacpp] OUTTYPE=$OUTTYPE"
-
-    # Try to reuse an existing GGUF if present
-    GGUF_FILE="$(compgen -G "$MODEL_ROOT"/*.gguf | head -n 1 || true)"
-
-    if [ -z "$GGUF_FILE" ]; then
-      echo "[llamacpp] No existing .gguf in $MODEL_ROOT – downloading HF model & converting"
-
-      # ── Step 1: download HF model (safetensors etc.) ───────────────────────
-      echo "[llamacpp] Downloading $MODEL_ID (rev=$REVISION) into $HF_DIR"
-      huggingface-cli download \
-        "$MODEL_ID" \
-        --revision "$REVISION" \
-        --local-dir "$HF_DIR" \
-        --include "*" \
-        --local-dir-use-symlinks False
-
-      # ── Step 2: convert to GGUF using llama.cpp:full ──────────────────────
-      echo "[llamacpp] Converting HF model to GGUF via $LLAMACPP_FULL_IMAGE (outtype=$OUTTYPE)"
-      docker run --rm \
-        -v "$HF_DIR":/repo \
-        "$LLAMACPP_FULL_IMAGE" \
-        --convert /repo \
-        --outtype "$OUTTYPE"
-
-      # The convert tool usually writes something like ggml-model-f16.gguf in /repo
-      GGUF_IN_HF="$(ls -1 "$HF_DIR"/*.gguf 2>/dev/null | head -n 1)"
-      if [ -z "$GGUF_IN_HF" ]; then
-        echo "[llamacpp] ERROR: conversion did not produce a .gguf file in $HF_DIR"
-        exit 1
-      fi
-
-      # Normalize filename in MODEL_ROOT
-      TARGET_GGUF="$MODEL_ROOT/model-${OUTTYPE}.gguf"
-      mv "$GGUF_IN_HF" "$TARGET_GGUF"
-      GGUF_FILE="$TARGET_GGUF"
+    # Ensure huggingface-cli exists on host
+    if ! command -v huggingface-cli >/dev/null 2>&1; then
+      echo "[llamacpp] Error: huggingface-cli not found on PATH."
+      echo "Install it with: pip install -U 'huggingface_hub[cli]'"
+      exit 1
     fi
 
-    echo "[llamacpp] Using GGUF file: $GGUF_FILE"
+    mkdir -p "${HF_DIR}"
 
-    # ===== RUN LLAMA.CPP SERVER (2nd container) =====
-    echo "[llamacpp] Starting llama.cpp server from $LLAMACPP_SERVER_IMAGE on port $PORT"
+    # Build auth args if token present
+    HF_AUTH_ARGS=()
+    if [[ -n "${HF_TOKEN}" ]]; then
+      HF_AUTH_ARGS+=(--token "${HF_TOKEN}")
+    fi
+
+    # Optional: allow overriding revision (branch/tag/commit) via HF_REVISION
+    HF_REVISION="${HF_REVISION:-}"
+    HF_REV_ARGS=()
+    if [[ -n "${HF_REVISION}" ]]; then
+      HF_REV_ARGS+=(--revision "${HF_REVISION}")
+    fi
+
+    # Download the repo snapshot into HF_DIR
+    huggingface-cli download "${MODEL}" \
+      "${HF_AUTH_ARGS[@]}" \
+      "${HF_REV_ARGS[@]}" \
+      --local-dir "${HF_DIR}" \
+      --local-dir-use-symlinks False
+
+    echo "[llamacpp] Download complete."
+  else
+    echo "[llamacpp] Found existing HF weights OR a GGUF file. Skipping download."
+  fi
+
+  # ─── 1. Convert ONLY if we don't have a GGUF yet ──────────────────────────
+  # Re-check for GGUF variable (in case we just downloaded and need to convert)
+  EXISTING_GGUF=$(find "${MODEL_ROOT}" -maxdepth 1 -name "*.gguf" -print -quit)
+
+  if [[ -z "${EXISTING_GGUF}" ]]; then
+    echo "[llamacpp] No GGUF found. Converting HF weights to F16 GGUF..."
 
     docker run --rm \
-      --gpus all \
-      -p "127.0.0.1:${PORT}:${PORT}" \
-      -v "$MODEL_ROOT":/models \
-      "$LLAMACPP_SERVER_IMAGE" \
-        -m "/models/$(basename "$GGUF_FILE")" \
-        -c "$CTX" \
-        --port "$PORT" \
-        --host 0.0.0.0 \
-        --n-gpu-layers "$N_GPU_LAYERS"
-    ;;
+      -v "$(realpath "$HF_DIR")":/input \
+      -v "$(realpath "$MODEL_ROOT")":/output \
+      "$LLAMACPP_FULL_IMAGE" \
+      --convert \
+      --outfile /output/model-f16.gguf \
+      --outtype f16 \
+      /input
+
+    # Update variable to point to the file we just created
+    EXISTING_GGUF="${MODEL_ROOT}/model-f16.gguf"
+    echo "[llamacpp] F16 conversion complete."
+  fi
+
+  # ─── 2. Start Server ──────────────────────────────────────────────────────
+  # We extract the filename so we can pass it to the docker container relative path
+  GGUF_FILENAME=$(basename "$EXISTING_GGUF")
+
+  echo "[llamacpp] Starting server on port $PORT..."
+  echo "[llamacpp] Loading model: $GGUF_FILENAME"
+
+  docker run --rm --gpus all \
+    -p "127.0.0.1:${PORT}:${PORT}" \
+    -v "$(realpath "$MODEL_ROOT")":/models \
+    -v "$(pwd)/benchmark/grammars":/grammars \
+    "$LLAMACPP_SERVER_IMAGE" \
+    -m "/models/${GGUF_FILENAME}" \
+    -c 32768 \
+    --host 0.0.0.0 \
+    --port "${PORT}" \
+    -ngl 99 \
+    --flash-attn on \
+    --no-mmap \
+    --grammar-file /grammars/json.gbnf
+  ;;
+
 
   tgi)
     # ────────────────────────────────────────────────────────────────────────
@@ -179,7 +161,6 @@ case "$ENGINE" in
         --port "$PORT" \
         --max-client-batch-size 512
     ;;
-
   vllm)
     # ────────────────────────────────────────────────────────────────────────
     # vLLM (OpenAI-compatible) container:
@@ -205,8 +186,41 @@ case "$ENGINE" in
       vllm/vllm-openai:latest \
         --model "$MODEL" \
         --trust-remote-code \
-        --max-model-len 4096 \
+        --max-model-len 16384 \
         --port "$PORT"
+    ;;
+
+  vllm-vl)
+    # ────────────────────────────────────────────────────────────────────────
+    # vLLM (OpenAI-compatible) container:
+    #
+    # docker run --rm \
+    #   --runtime=nvidia --gpus all \
+    #   -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+    #   -e HUGGING_FACE_HUB_TOKEN="$HF_TOKEN" \
+    #   -p 127.0.0.1:23333:23333 \
+    #   --ipc=host \
+    #   vllm/vllm-openai:latest \
+    #     --model mistralai/Mistral-7B-Instruct-v0.3 \
+    #     --port 23333
+
+    #
+    # ───────────────────    docker run --rm \
+      --runtime=nvidia --gpus all \
+      -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      -e HUGGING_FACE_HUB_TOKEN="$HF_TOKEN" \
+      -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+      -p 127.0.0.1:${PORT}:${PORT} \
+      --ipc=host \
+      vllm/vllm-openai:latest \
+        --model "$MODEL" \
+        --quantization fp8 \
+        --trust-remote-code \
+        --max-model-len 32000 \
+        --port "$PORT" \
+        --gpu-memory-utilization 0.96 \
+        #--chat-template-content-format string─────────────────────────────────────────────────────
+
     ;;
 
   lmdeploy)
@@ -295,7 +309,6 @@ case "$ENGINE" in
 
   *)
     echo "Error: unsupported engine '$ENGINE'."
-    echo "Please choose one of: tgi, vllm, lmdeploy, sglang, mii."
     exit 1
     ;;
 esac

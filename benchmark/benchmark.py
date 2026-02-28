@@ -52,8 +52,8 @@ class ModelBenchmark:
         max_tokens: int = 128,
         verbose=False
     ):
-        if backend not in ("tgi", "mii", "sglang", "vllm", "lmdeploy", "llamacpp"):
-            raise ValueError(f"Unsupported backend: {backend}. Supported backends are: tgi, mii, sglang, vllm, lmdeploy, llamacpp.")
+        if backend not in ("tgi", "mii", "sglang", "vllm", "lmdeploy", "llamacpp", "vllm-vl"):
+            raise ValueError(f"Unsupported backend: {backend}. Supported backends are: tgi, mii, sglang, vllm, lmdeploy, llamacpp, vllm-vl.")
         self.backend = backend
         self.model_path = model_path
         self.model_name = model_name
@@ -401,6 +401,7 @@ class ModelBenchmark:
         ▸ wait_time    – (send_time − (start_wall + scheduled_ts))
         ▸ e2e_latency  – wait_time + generation_time
         """
+        print("starting prompt")
 
         # ── 1. thread has started ──────────────────────────────────────────
         send_time  = time.time()
@@ -460,9 +461,18 @@ class ModelBenchmark:
         elif task == "mmlu":
             from benchmark.tasks.mmlu import MMLUTask
             task_ = MMLUTask()
-        elif task == "ie":
+        elif task == "ie_registration":
             from benchmark.tasks.ie import InfoExtractionTask
-            task_ = InfoExtractionTask()
+            task_ = InfoExtractionTask(dataset_name="registration")
+        elif task == "ie_ad_buy":
+            from benchmark.tasks.ie import InfoExtractionTask
+            task_ = InfoExtractionTask(dataset_name="ad-buy")
+        elif task == "ie_vl_registration":
+            from benchmark.tasks.ie_vl import VisualInfoExtractionTask
+            task_ = VisualInfoExtractionTask(dataset_name="registration")
+        elif task == "ie_vl_ad_buy":
+            from benchmark.tasks.ie_vl import VisualInfoExtractionTask
+            task_ = VisualInfoExtractionTask(dataset_name="ad-buy")
         else:
             raise ValueError(f"Task {task!r} not supported.")
 
